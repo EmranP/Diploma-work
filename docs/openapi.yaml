@@ -1,0 +1,501 @@
+openapi: 3.0.3
+info:
+  title: Phishing Detector API
+  version: 1.0.0
+  description: >-
+    HTTP API for submitting URLs for asynchronous phishing-risk analysis,
+    retrieving scan results, and viewing administrator statistics.
+servers:
+  - url: http://localhost:8080
+    description: Browser requests to host port 8080
+  - url: http://backend:8080
+    description: Internal Docker network (phishing-net)
+
+tags:
+  - name: Health
+    description: Service health
+  - name: Authentication
+    description: Login and access-token issuance
+  - name: Scans
+    description: Scan submission and result retrieval
+  - name: Statistics
+    description: Administrator statistics
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Check API health
+      security: []
+      responses:
+        '200':
+          description: API is responding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: login
+      summary: Authenticate a user
+      description: >-
+        Authenticates with email and password. Email is trimmed and normalized
+        to lowercase by the server. A successful response contains an HS256
+        JWT access token valid for 8 hours.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: test@test.com
+              password: 12345
+      responses:
+        '200':
+          description: Authentication succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                tokenType: Bearer
+                expiresIn: 28800
+                user:
+                  id: 12
+                  email: user@example.com
+                  role: user
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Email or password is incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Email or password is incorrect
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/scans:
+    post:
+      tags: [Scans]
+      operationId: createScan
+      summary: Submit a URL for analysis
+      description: >-
+        Creates a pending scan and publishes its identifier to the background
+        JetStream queue. Analysis is asynchronous; this endpoint does not
+        return the final risk assessment. The owner is taken from the JWT and
+        cannot be supplied or overridden in the request body. URL syntax is
+        evaluated by the background analyzer, so a non-empty string is
+        accepted here even if it later produces a failed scan.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateScanRequest'
+            example:
+              url: https://example.com/login
+      responses:
+        '202':
+          description: Scan was created and queued for asynchronous processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scan'
+              example:
+                id: 42
+                userId: 12
+                url: https://example.com/login
+                normalizedUrl: ''
+                status: pending
+                riskLevel: unknown
+                score: 0
+                createdAt: '2026-11-24T12:00:00Z'
+                updatedAt: '2026-11-24T12:00:00Z'
+                indicators: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          description: Scan service or background queue is unavailable, or publishing failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Scan queue is unavailable
+
+    get:
+      tags: [Scans]
+      operationId: listScans
+      summary: List scans visible to the authenticated user
+      description: >-
+        Regular users receive only their own scans. Administrators receive all
+        scans. Results are ordered by creation time descending. Invalid or
+        out-of-range limit values are silently replaced with the default value
+        of 20; they do not produce a 400 response.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: >-
+            Maximum number of scans to return. Values outside 1–100, or values
+            that cannot be parsed as integers, fall back to 20.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Scans visible to the authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanListResponse'
+              example:
+                items: []
+                total: 0
+                limit: 20
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/scans/{id}:
+    get:
+      tags: [Scans]
+      operationId: getScan
+      summary: Get a scan by ID
+      description: >-
+        Returns the scan and its indicators. A regular user can retrieve only
+        their own scans. A scan belonging to another user is reported as not
+        found rather than forbidden.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Positive scan identifier
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Scan details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scan'
+              example:
+                id: 42
+                userId: 12
+                url: https://example.com/login
+                normalizedUrl: https://example.com/login
+                status: completed
+                riskLevel: high
+                score: 62
+                createdAt: '2026-11-24T12:00:00Z'
+                updatedAt: '2026-11-24T12:00:02Z'
+                indicators:
+                  - id: 8
+                    scanId: 42
+                    code: HTTP_ONLY
+                    description: URL does not use HTTPS
+                    weight: 20
+        '400':
+          description: Scan ID is invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Invalid scan ID
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Scan does not exist or is not visible to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Scan not found
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/stats:
+    get:
+      tags: [Statistics]
+      operationId: getStats
+      summary: Get scan statistics
+      description: >-
+        Administrator-only endpoint. highRiskScans counts scans whose risk
+        level is high or critical. Statistics are calculated across all scans.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Scan statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+              example:
+                totalScans: 100
+                highRiskScans: 15
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Authenticated user does not have the admin role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Insufficient permissions
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Supply the access token returned by POST /api/auth/login. The current
+        implementation signs tokens with HS256.
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: Invalid request body
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          description: Email address; the server trims whitespace and lowercases it
+          example: user@example.com
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          example: example-password
+
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken:
+          type: string
+          description: Signed JWT access token
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          description: Token lifetime in seconds
+          example: 28800
+        user:
+          $ref: '#/components/schemas/PublicUser'
+
+    PublicUser:
+      type: object
+      required: [id, email, role]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        email:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+
+    ScanStatus:
+      type: string
+      description: Current asynchronous scan-processing state
+      enum: [pending, processing, completed, failed]
+
+    RiskLevel:
+      type: string
+      description: Risk classification produced by the URL analyzer
+      enum: [unknown, low, medium, high, critical]
+
+    CreateScanRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          description: >-
+            Non-empty URL input. Full URL validation and analysis happen in
+            the background after the scan has been created.
+          example: https://example.com/login
+
+    Indicator:
+      type: object
+      required: [id, scanId, code, description, weight]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        scanId:
+          type: integer
+          format: int64
+          minimum: 1
+        code:
+          type: string
+          example: HTTP_ONLY
+        description:
+          type: string
+          example: URL does not use HTTPS
+        weight:
+          type: integer
+          example: 20
+
+    Scan:
+      type: object
+      required:
+        - id
+        - userId
+        - url
+        - normalizedUrl
+        - status
+        - riskLevel
+        - score
+        - createdAt
+        - updatedAt
+        - indicators
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        userId:
+          type: integer
+          format: int64
+          minimum: 1
+        url:
+          type: string
+        normalizedUrl:
+          type: string
+          description: Empty until the background analyzer normalizes the URL
+        status:
+          $ref: '#/components/schemas/ScanStatus'
+        riskLevel:
+          $ref: '#/components/schemas/RiskLevel'
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        error:
+          type: string
+          description: Present when the scan has an error; omitted when empty
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        indicators:
+          type: array
+          nullable: true
+          description: May be null in the immediate 202 response before indicators are created
+          items:
+            $ref: '#/components/schemas/Indicator'
+
+    ScanListResponse:
+      type: object
+      required: [items, total, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Scan'
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+
+    StatsResponse:
+      type: object
+      required: [totalScans, highRiskScans]
+      properties:
+        totalScans:
+          type: integer
+          format: int64
+          minimum: 0
+        highRiskScans:
+          type: integer
+          format: int64
+          minimum: 0
+
+  responses:
+    BadRequest:
+      description: Request body or parameter is invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Invalid request body
+    Unauthorized:
+      description: Missing, invalid, or expired access token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Invalid or expired token
+    InternalServerError:
+      description: Unexpected internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Internal server error

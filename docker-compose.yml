@@ -1,0 +1,175 @@
+name: Diploma
+
+services:
+  db:
+    build:
+      context: backend
+      dockerfile: Dockerfile.database
+    container_name: ${POSTGRES_DB}
+    restart: always
+    env_file:
+      - backend/.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - '${POSTGRES_PORT}:${POSTGRES_PORT}'
+    volumes:
+      - 'pgdata:/var/lib/postgresql'
+    networks:
+      - phishing-net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      start_period: 7s
+      retries: 5
+
+  redis:
+    image: redis:8.0-alpine
+    container_name: phishing-cache
+    restart: always
+    env_file:
+      - backend/.env
+    command: ['redis-server']
+    ports:
+      - '${REDIS_PORT}:${REDIS_PORT}'
+    volumes:
+      - 'cache:/var/lib/cache'
+    networks:
+      - phishing-net
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'PING']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ['-js', '-sd', '/data']
+    env_file:
+      - backend/.env
+    ports:
+      - '${NATS_PORT}:4222'
+      - '8222:8222'
+    volumes:
+      - 'natsdata:/data'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '-q',
+          '-O',
+          '/dev/null',
+          'http://127.0.0.1:8222/healthz',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 3s
+    networks:
+      - phishing-net
+
+  backend:
+    build:
+      context: backend
+      dockerfile: Dockerfile
+    container_name: phishing-app
+    restart: unless-stopped
+    stop_grace_period: 40s
+    ports:
+      - '${APP_PORT}:${APP_PORT}'
+    env_file:
+      - backend/.env
+    volumes:
+      - './backend:/app'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    networks:
+      - phishing-net
+
+  port-forwarder:
+    image: alpine/socat:1.8.1.3
+    container_name: phishing-forwarder
+    restart: always
+    env_file:
+      - backend/.env
+    ports:
+      - '${APP_HOST}:5433:${POSTGRES_PORT}'
+    command:
+      - 'tcp-listen:${POSTGRES_PORT},fork,reuseaddr'
+      - 'tcp-connect:db-dev:${POSTGRES_PORT}'
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - phishing-net
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: phishing-pgadmin
+    env_file:
+      - backend/.env
+    ports:
+      - '${PGADMIN_PORT}:80'
+    volumes:
+      - 'pgadmin:/var/lib/pgadmin'
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - phishing-net
+
+  swagger:
+    image: swaggerapi/swagger-ui
+    container_name: phishing-swagger
+    ports:
+      - '${SWAGGER_PORT}:${SWAGGER_PORT}'
+    environment:
+      SWAGGER_JSON: /docs/openapi.yaml
+      SWAGGER_FILE: /docs/openapi.yaml
+      PORT: '${SWAGGER_PORT}'
+
+    networks:
+      - phishing-net
+    volumes:
+      - ${PROJECT_ROOT}/docs:/docs:ro
+    depends_on:
+      backend:
+        condition: service_started
+
+  # frontend:
+  #   build:
+  #     context: frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - '5173:5173'
+  #   depends_on:
+  #     - backend
+
+volumes:
+  pgdata:
+    driver: local
+  cache:
+    driver: local
+  pgadmin:
+    driver: local
+  natsdata:
+    driver: local
+  docs:
+    driver: local
+
+networks:
+  phishing-net:
+    driver: bridge
+    name: phishing-net

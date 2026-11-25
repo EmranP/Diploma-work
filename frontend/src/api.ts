@@ -1,9 +1,10 @@
 import type {
+	HealthResponse,
 	LoginResponse,
 	Scan,
 	ScanListResponse,
 	Stats,
-} from '../types/types'
+} from './types'
 
 const API_URL = (
 	import.meta.env.VITE_API_URL ?? 'http://localhost:8080'
@@ -88,4 +89,9 @@ export const api = {
 		}),
 
 	scan: (token: string, id: number) => request<Scan>(`/api/scans/${id}`, token),
+
+	health: (signal?: AbortSignal) =>
+		request<HealthResponse>('/health', undefined, {
+			signal,
+		}),
 }

@@ -4,6 +4,10 @@ export type ScanStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
 export type RiskLevel = 'unknown' | 'low' | 'medium' | 'high' | 'critical'
 
+export type HealthResponse = {
+	status: string
+}
+
 export type Indicator = {
 	id: number
 	scanId: number
